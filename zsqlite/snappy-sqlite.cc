@@ -1,5 +1,3 @@
-#include <snappy.h>
-
 #include <string>
 #include <iostream>
 #include <iterator>
@@ -7,16 +5,26 @@
 #include <vector>
 #include <cerrno>
 #include <cstring>
+#include <stdexcept>
 
 #include <assert.h>
 #include <stdint.h>
+
+#include <snappy.h>
+
+#include <lzo/lzoconf.h>
+#include <lzo/lzo1x.h>
 
 using namespace std;
 using namespace snappy;
 
 
 // function copied from snappy
-inline char* string_as_array(string * str) {
+inline char* string_as_array(std::string * str) {
+	return str->empty() ? NULL : &*str->begin();
+}
+
+inline const char* string_as_array(const std::string * str) {
 	return str->empty() ? NULL : &*str->begin();
 }
 
@@ -34,6 +42,57 @@ streampos file_len(ifstream &s) {
 	s.seekg (0, ios::end);
 	return s.tellg();
 }
+
+class SnappyCompressor {
+
+public:
+	SnappyCompressor() {}
+
+	void compress(const std::string & in, std::string & out) {
+		Compress(in.data(), in.size(), &out);
+
+		#ifdef PARANOID
+		assert( IsValidCompressedBuffer(string_as_array(&out), out.size()) );
+		#endif
+	}
+};
+
+/**
+ * TODO Test LZO1F
+ */
+class LZOCompressor {
+
+	char * wrkmem;
+
+public:
+	LZOCompressor() {
+		if (lzo_init() != LZO_E_OK) {
+			cerr << "Failed to init LZO" << endl;
+			throw new runtime_error("Failed to init LZO");
+		}
+
+		this->wrkmem = new char[LZO1X_1_MEM_COMPRESS];
+	}
+
+	~LZOCompressor() {
+		delete[] this->wrkmem;
+	}
+
+	void compress(const std::string & in, std::string & out) {
+		size_t in_len = in.size();
+		size_t out_len = in_len + in_len / 16 + 64 + 3;
+		out.reserve(out_len);
+
+		int r = lzo1x_1_compress(
+			(unsigned char *) string_as_array(&in), in_len,
+			(unsigned char *) string_as_array(&out), &out_len, wrkmem);
+		if (r != LZO_E_OK) {
+			printf("internal error - compression failed: %d\n", r);
+		}
+
+		out.resize(out_len);
+	}
+};
 
 int main(int argc, const char *argv[]) {
 	const size_t block_size = 4096;
@@ -61,6 +120,9 @@ int main(int argc, const char *argv[]) {
 	}
 //	out_file.exceptions(ios::badbit | ios::failbit);
 
+	LZOCompressor * compressor = new LZOCompressor();
+	//SnappyCompressor * compressor = new SnappyCompressor();
+
 	int index_len = file_len(in_file) / block_size + 1;
 
 	header head(block_size, index_len);
@@ -87,10 +149,12 @@ int main(int argc, const char *argv[]) {
 		}
 
 		size_t in_len = in_file.gcount();
+		uncompressed.resize(in_len);
 		in_total += in_len;
 
-		Compress(uncompressed.data(), in_len, &compressed);
-		assert( IsValidCompressedBuffer(string_as_array(&compressed), compressed.size()) );
+		assert(in_len > 0);
+
+		compressor->compress(uncompressed, compressed);
 
 		// write compressed to file
 		out_file.write(compressed.data(), compressed.size());

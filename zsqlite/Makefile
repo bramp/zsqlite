@@ -2,7 +2,7 @@ OBJS = snappy-sqlite.o
 CC = clang++
 DEBUG = -g
 CFLAGS = -Wall -c $(DEBUG)
-LFLAGS = -Wall -Wl,--no-as-needed -lsnappy $(DEBUG)
+LFLAGS = -Wall -Wl,--no-as-needed -lsnappy -llzo2 $(DEBUG)
 
 snappy-sqlite : $(OBJS)
 	$(CC) $(LFLAGS) $(OBJS) -o $@
