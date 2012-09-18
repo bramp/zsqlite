@@ -107,6 +107,8 @@
 ** option and (2) you must compile and link the three source files
 ** shell,c, test_vfstrace.c, and sqlite3.c.  
 */
+#include <snappy-c.h>
+
 #include <stdlib.h>
 #include <string.h>
 #include "sqlite3.h"
@@ -175,110 +177,6 @@ static int vfstraceSetSystemCall(sqlite3_vfs*,const char*, sqlite3_syscall_ptr);
 static sqlite3_syscall_ptr vfstraceGetSystemCall(sqlite3_vfs*, const char *);
 static const char *vfstraceNextSystemCall(sqlite3_vfs*, const char *zName);
 
-/*
-** Return a pointer to the tail of the pathname.  Examples:
-**
-**     /home/drh/xyzzy.txt -> xyzzy.txt
-**     xyzzy.txt           -> xyzzy.txt
-*/
-static const char *fileTail(const char *z){
-  int i;
-  if( z==0 ) return 0;
-  i = strlen(z)-1;
-  while( i>0 && z[i-1]!='/' ){ i--; }
-  return &z[i];
-}
-
-/*
-** Send trace output defined by zFormat and subsequent arguments.
-*/
-static void vfstrace_printf(
-  vfstrace_info *pInfo,
-  const char *zFormat,
-  ...
-){
-  va_list ap;
-  char *zMsg;
-  va_start(ap, zFormat);
-  zMsg = sqlite3_vmprintf(zFormat, ap);
-  va_end(ap);
-  pInfo->xOut(zMsg, pInfo->pOutArg);
-  sqlite3_free(zMsg);
-}
-
-/*
-** Convert value rc into a string and print it using zFormat.  zFormat
-** should have exactly one %s
-*/
-static void vfstrace_print_errcode(
-  vfstrace_info *pInfo,
-  const char *zFormat,
-  int rc
-){
-  char zBuf[50];
-  char *zVal;
-  switch( rc ){
-    case SQLITE_OK:         zVal = "SQLITE_OK";          break;
-    case SQLITE_ERROR:      zVal = "SQLITE_ERROR";       break;
-    case SQLITE_PERM:       zVal = "SQLITE_PERM";        break;
-    case SQLITE_ABORT:      zVal = "SQLITE_ABORT";       break;
-    case SQLITE_BUSY:       zVal = "SQLITE_BUSY";        break;
-    case SQLITE_NOMEM:      zVal = "SQLITE_NOMEM";       break;
-    case SQLITE_READONLY:   zVal = "SQLITE_READONLY";    break;
-    case SQLITE_INTERRUPT:  zVal = "SQLITE_INTERRUPT";   break;
-    case SQLITE_IOERR:      zVal = "SQLITE_IOERR";       break;
-    case SQLITE_CORRUPT:    zVal = "SQLITE_CORRUPT";     break;
-    case SQLITE_FULL:       zVal = "SQLITE_FULL";        break;
-    case SQLITE_CANTOPEN:   zVal = "SQLITE_CANTOPEN";    break;
-    case SQLITE_PROTOCOL:   zVal = "SQLITE_PROTOCOL";    break;
-    case SQLITE_EMPTY:      zVal = "SQLITE_EMPTY";       break;
-    case SQLITE_SCHEMA:     zVal = "SQLITE_SCHEMA";      break;
-    case SQLITE_CONSTRAINT: zVal = "SQLITE_CONSTRAINT";  break;
-    case SQLITE_MISMATCH:   zVal = "SQLITE_MISMATCH";    break;
-    case SQLITE_MISUSE:     zVal = "SQLITE_MISUSE";      break;
-    case SQLITE_NOLFS:      zVal = "SQLITE_NOLFS";       break;
-    case SQLITE_IOERR_READ:         zVal = "SQLITE_IOERR_READ";         break;
-    case SQLITE_IOERR_SHORT_READ:   zVal = "SQLITE_IOERR_SHORT_READ";   break;
-    case SQLITE_IOERR_WRITE:        zVal = "SQLITE_IOERR_WRITE";        break;
-    case SQLITE_IOERR_FSYNC:        zVal = "SQLITE_IOERR_FSYNC";        break;
-    case SQLITE_IOERR_DIR_FSYNC:    zVal = "SQLITE_IOERR_DIR_FSYNC";    break;
-    case SQLITE_IOERR_TRUNCATE:     zVal = "SQLITE_IOERR_TRUNCATE";     break;
-    case SQLITE_IOERR_FSTAT:        zVal = "SQLITE_IOERR_FSTAT";        break;
-    case SQLITE_IOERR_UNLOCK:       zVal = "SQLITE_IOERR_UNLOCK";       break;
-    case SQLITE_IOERR_RDLOCK:       zVal = "SQLITE_IOERR_RDLOCK";       break;
-    case SQLITE_IOERR_DELETE:       zVal = "SQLITE_IOERR_DELETE";       break;
-    case SQLITE_IOERR_BLOCKED:      zVal = "SQLITE_IOERR_BLOCKED";      break;
-    case SQLITE_IOERR_NOMEM:        zVal = "SQLITE_IOERR_NOMEM";        break;
-    case SQLITE_IOERR_ACCESS:       zVal = "SQLITE_IOERR_ACCESS";       break;
-    case SQLITE_IOERR_CHECKRESERVEDLOCK:
-                               zVal = "SQLITE_IOERR_CHECKRESERVEDLOCK"; break;
-    case SQLITE_IOERR_LOCK:         zVal = "SQLITE_IOERR_LOCK";         break;
-    case SQLITE_IOERR_CLOSE:        zVal = "SQLITE_IOERR_CLOSE";        break;
-    case SQLITE_IOERR_DIR_CLOSE:    zVal = "SQLITE_IOERR_DIR_CLOSE";    break;
-    case SQLITE_IOERR_SHMOPEN:      zVal = "SQLITE_IOERR_SHMOPEN";      break;
-    case SQLITE_IOERR_SHMSIZE:      zVal = "SQLITE_IOERR_SHMSIZE";      break;
-    case SQLITE_IOERR_SHMLOCK:      zVal = "SQLITE_IOERR_SHMLOCK";      break;
-    case SQLITE_LOCKED_SHAREDCACHE: zVal = "SQLITE_LOCKED_SHAREDCACHE"; break;
-    case SQLITE_BUSY_RECOVERY:      zVal = "SQLITE_BUSY_RECOVERY";      break;
-    case SQLITE_CANTOPEN_NOTEMPDIR: zVal = "SQLITE_CANTOPEN_NOTEMPDIR"; break;
-    default: {
-       sqlite3_snprintf(sizeof(zBuf), zBuf, "%d", rc);
-       zVal = zBuf;
-       break;
-    }
-  }
-  vfstrace_printf(pInfo, zFormat, zVal);
-}
-
-/*
-** Append to a buffer.
-*/
-static void strappend(char *z, int *pI, const char *zAppend){
-  int i = *pI;
-  while( zAppend[0] ){ z[i++] = *(zAppend++); }
-  z[i] = 0;
-  *pI = i;
-}
 
 /*
 ** Close an vfstrace-file.
@@ -286,15 +184,7 @@ static void strappend(char *z, int *pI, const char *zAppend){
 static int vfstraceClose(sqlite3_file *pFile){
   vfstrace_file *p = (vfstrace_file *)pFile;
   vfstrace_info *pInfo = p->pInfo;
-  int rc;
-  vfstrace_printf(pInfo, "%s.xClose(%s)", pInfo->zVfsName, p->zFName);
-  rc = p->pReal->pMethods->xClose(p->pReal);
-  vfstrace_print_errcode(pInfo, " -> %s\n", rc);
-  if( rc==SQLITE_OK ){
-    sqlite3_free((void*)p->base.pMethods);
-    p->base.pMethods = 0;
-  }
-  return rc;
+  return p->pReal->pMethods->xClose(p->pReal);
 }
 
 /*
@@ -308,12 +198,54 @@ static int vfstraceRead(
 ){
   vfstrace_file *p = (vfstrace_file *)pFile;
   vfstrace_info *pInfo = p->pInfo;
-  int rc;
-  vfstrace_printf(pInfo, "%s.xRead(%s,n=%d,ofst=%lld)",
-                  pInfo->zVfsName, p->zFName, iAmt, iOfst);
-  rc = p->pReal->pMethods->xRead(p->pReal, zBuf, iAmt, iOfst);
-  vfstrace_print_errcode(pInfo, " -> %s\n", rc);
-  return rc;
+
+  int buf_size = 4096;
+  sqlite_int64 index[];
+  char * zBufPtr = (char *) zBuf;
+  int block = (iOfst / buf_size);
+  char tmp[ block_len ];
+
+  while (iAmt > 0) {
+    sqlite_int64 realOfst = index[block];
+    int block_len = index[block + 1] - index[block];
+
+    int rc = p->pReal->pMethods->xRead(p->pReal, tmp, block_len, realOfst);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+
+    size_t zBufAmt;
+
+    if (iAmt < buf_size) {
+      // The calle's buffer doesn't have enough space, so we decompress into our own space
+      // and copy back
+      char tmp2[ buf_size ];
+      zBufAmt = buf_size;
+
+      snappy_status status = snappy_uncompress(tmp, block_len, tmp2, &zBufAmt);
+      if (status != SNAPPY_OK || zBufAmt != buf_size) {
+        return SQLITE_CORRUPT;
+      }
+
+      zBufAmt = iAmt;
+      memcpy(zBufPtr, tmp2, iAmt);
+    } else {
+      // Uncompress directly into calle's buffer
+      zBufAmt = iAmt;
+      snappy_status status = snappy_uncompress(tmp, block_len, zBufPtr, &zBufAmt);
+
+      if (status != SNAPPY_OK || zBufAmt != buf_size) {
+        return SQLITE_CORRUPT;
+      }
+    }
+
+    zBufPtr += zBufAmt;
+    iAmt    -= zBufAmt;
+
+    block++;
+  }
+
+  return SQLITE_OK;
 }
 
 /*
@@ -325,23 +257,14 @@ static int vfstraceWrite(
   int iAmt, 
   sqlite_int64 iOfst
 ){
-  vfstrace_file *p = (vfstrace_file *)pFile;
-  vfstrace_info *pInfo = p->pInfo;
-  int rc;
-  vfstrace_printf(pInfo, "%s.xWrite(%s,n=%d,ofst=%lld)",
-                  pInfo->zVfsName, p->zFName, iAmt, iOfst);
-  rc = p->pReal->pMethods->xWrite(p->pReal, zBuf, iAmt, iOfst);
-  vfstrace_print_errcode(pInfo, " -> %s\n", rc);
-  return rc;
+  return SQLITE_READONLY;
 }
 
 /*
 ** Truncate an vfstrace-file.
 */
 static int vfstraceTruncate(sqlite3_file *pFile, sqlite_int64 size){
-  vfstrace_file *p = (vfstrace_file *)pFile;
-  vfstrace_info *pInfo = p->pInfo;
-  return p->pReal->pMethods->xTruncate(p->pReal, size);
+  return SQLITE_READONLY;
 }
 
 /*
@@ -418,6 +341,7 @@ static int vfstraceDeviceCharacteristics(sqlite3_file *pFile){
 
 /*
 ** Shared-memory operations.
+*  TODO Figure out how to support
 */
 static int vfstraceShmLock(sqlite3_file *pFile, int ofst, int n, int flags){
   vfstrace_file *p = (vfstrace_file *)pFile;
@@ -637,6 +561,7 @@ static int vfstraceSetSystemCall(
   sqlite3_vfs *pRoot = pInfo->pRootVfs;
   return pRoot->xSetSystemCall(pRoot, zName, pFunc);
 }
+
 static sqlite3_syscall_ptr vfstraceGetSystemCall(
   sqlite3_vfs *pVfs,
   const char *zName
@@ -645,6 +570,7 @@ static sqlite3_syscall_ptr vfstraceGetSystemCall(
   sqlite3_vfs *pRoot = pInfo->pRootVfs;
   return pRoot->xGetSystemCall(pRoot, zName);
 }
+
 static const char *vfstraceNextSystemCall(sqlite3_vfs *pVfs, const char *zName){
   vfstrace_info *pInfo = (vfstrace_info*)pVfs->pAppData;
   sqlite3_vfs *pRoot = pInfo->pRootVfs;
@@ -675,48 +601,49 @@ int vfstrace_register(
 
   pRoot = sqlite3_vfs_find(zOldVfsName);
   if( pRoot==0 ) return SQLITE_NOTFOUND;
+
   nName = strlen(zTraceName);
   nByte = sizeof(*pNew) + sizeof(*pInfo) + nName + 1;
   pNew = sqlite3_malloc( nByte );
   if( pNew==0 ) return SQLITE_NOMEM;
+
   memset(pNew, 0, nByte);
+
   pInfo = (vfstrace_info*)&pNew[1];
-  pNew->iVersion = pRoot->iVersion;
-  pNew->szOsFile = pRoot->szOsFile + sizeof(vfstrace_file);
+  pNew->szOsFile   = pRoot->szOsFile + sizeof(vfstrace_file);
   pNew->mxPathname = pRoot->mxPathname;
   pNew->zName = (char*)&pInfo[1];
   memcpy((char*)&pInfo[1], zTraceName, nName+1);
+
   pNew->pAppData = pInfo;
-  pNew->xOpen = vfstraceOpen;
-  pNew->xDelete = vfstraceDelete;
-  pNew->xAccess = vfstraceAccess;
+  pNew->iVersion = 2; //pRoot->iVersion;
+
+  pNew->xOpen         = vfstraceOpen;
+  pNew->xDelete       = vfstraceDelete;
+  pNew->xAccess       = vfstraceAccess;
   pNew->xFullPathname = vfstraceFullPathname;
-  pNew->xDlOpen = pRoot->xDlOpen==0 ? 0 : vfstraceDlOpen;
-  pNew->xDlError = pRoot->xDlError==0 ? 0 : vfstraceDlError;
-  pNew->xDlSym = pRoot->xDlSym==0 ? 0 : vfstraceDlSym;
-  pNew->xDlClose = pRoot->xDlClose==0 ? 0 : vfstraceDlClose;
-  pNew->xRandomness = vfstraceRandomness;
-  pNew->xSleep = vfstraceSleep;
-  pNew->xCurrentTime = vfstraceCurrentTime;
-  pNew->xGetLastError = pRoot->xGetLastError==0 ? 0 : vfstraceGetLastError;
-  if( pNew->iVersion>=2 ){
-    pNew->xCurrentTimeInt64 = pRoot->xCurrentTimeInt64==0 ? 0 :
-                                   vfstraceCurrentTimeInt64;
-    if( pNew->iVersion>=3 ){
-      pNew->xSetSystemCall = pRoot->xSetSystemCall==0 ? 0 : 
-                                   vfstraceSetSystemCall;
-      pNew->xGetSystemCall = pRoot->xGetSystemCall==0 ? 0 : 
-                                   vfstraceGetSystemCall;
-      pNew->xNextSystemCall = pRoot->xNextSystemCall==0 ? 0 : 
-                                   vfstraceNextSystemCall;
+  pNew->xDlOpen       = vfstraceDlOpen;
+  pNew->xDlError      = vfstraceDlError;
+  pNew->xDlSym        = vfstraceDlSym;
+  pNew->xDlClose      = vfstraceDlClose;
+  pNew->xRandomness   = vfstraceRandomness;
+  pNew->xSleep        = vfstraceSleep;
+  pNew->xCurrentTime  = vfstraceCurrentTime;
+  pNew->xGetLastError = vfstraceGetLastError;
+
+  if( pNew->iVersion >= 2 ) {
+    pNew->xCurrentTimeInt64 = vfstraceCurrentTimeInt64;
+    if( pNew->iVersion >= 3 ) {
+      pNew->xSetSystemCall  = vfstraceSetSystemCall;
+      pNew->xGetSystemCall  = vfstraceGetSystemCall;
+      pNew->xNextSystemCall = vfstraceNextSystemCall;
     }
   }
-  pInfo->pRootVfs = pRoot;
-  pInfo->xOut = xOut;
-  pInfo->pOutArg = pOutArg;
-  pInfo->zVfsName = pNew->zName;
+
+  pInfo->pRootVfs  = pRoot;
+  pInfo->xOut      = xOut;
+  pInfo->pOutArg   = pOutArg;
+  pInfo->zVfsName  = pNew->zName;
   pInfo->pTraceVfs = pNew;
-  vfstrace_printf(pInfo, "%s.enabled_for(\"%s\")\n",
-       pInfo->zVfsName, pRoot->zName);
   return sqlite3_vfs_register(pNew, makeDefault);
 }
